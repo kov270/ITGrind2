@@ -1,2 +1,4 @@
 aiohttp>=3.10,<4
 aiofiles>=24.1,<26
+beautifulsoup4>=4.12,<5
+lxml>=5,<7

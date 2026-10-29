@@ -4,6 +4,7 @@ import asyncio
 import logging
 
 import aiohttp
+from html_parser import HTMLParser
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,8 @@ class AsyncCrawler:
         self._closed = False
         self.errors: dict[str, str] = {}
         self.statuses: dict[str, int] = {}
+        self.final_urls = {}
+        self.parser = HTMLParser()
 
     def _get_session(self):
         if self._closed:
@@ -53,10 +56,12 @@ class AsyncCrawler:
             session = self._get_session()
             self.errors.pop(url, None)
             self.statuses.pop(url, None)
+            self.final_urls.pop(url, None)
             logger.info("Начало загрузки: %s", url)
             try:
                 async with session.get(url) as response:
                     self.statuses[url] = response.status
+                    self.final_urls[url] = str(response.url)
                     response.raise_for_status()
                     body = await response.text(errors="replace")
                     logger.info("Успешно: %s | HTTP %s | %s символов", url, response.status, len(body))
@@ -79,6 +84,17 @@ class AsyncCrawler:
         unique_urls = list(dict.fromkeys(urls))
         bodies = await asyncio.gather(*(self.fetch_url(url) for url in unique_urls))
         return {url: body for url, body in zip(unique_urls, bodies) if url not in self.errors}
+
+    async def fetch_and_parse(self, url):
+        """Загрузить HTML и извлечь данные; при ошибке сохранить схему и поле error."""
+        html = await self.fetch_url(url)
+        if url in self.errors:
+            result = self.parser.empty_result(url)
+            result["error"] = self.errors[url]
+            return result
+        result = await self.parser.parse_html(html, self.final_urls.get(url, url))
+        result["url"] = url
+        return result
 
     async def close(self):
         """Закрыть сессию и пул; повторный вызов безопасен. Дождитесь запросов перед close."""

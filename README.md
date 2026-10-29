@@ -1,6 +1,63 @@
 # ITGrind2
 week 2
 
+## День 2 — Парсинг HTML
+
+Реализация продолжает проект первого дня в той же папке.
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe demo_day2.py --local --output results.json
+.\.venv\Scripts\python.exe demo_day2.py
+.\.venv\Scripts\python.exe -m unittest -v
+```
+
+`html_parser.py` содержит `HTMLParser`. `await crawler.fetch_and_parse(url)`
+возвращает `url`, `title`, `text`, `links`, `metadata`, `images`, `headings`,
+`tables`, `lists`, `warnings`. При ошибке загрузки возвращается та же схема
+с пустыми данными и дополнительным `error`. `url` остаётся исходным адресом,
+а относительные ссылки разрешаются относительно конечного адреса после редиректов
+и первого тега `<base href>`, если он задан.
+
+```python
+async with AsyncCrawler() as crawler:
+    page = await crawler.fetch_and_parse("https://example.com")
+    print(page["title"])
+    print(page["links"])
+```
+
+Методы `extract_links`, `extract_text`, `extract_metadata`, `extract_images`,
+`extract_headings`, `extract_tables`, `extract_lists` можно использовать отдельно
+с объектом BeautifulSoup. `extract_text(soup, selector=".content")` поддерживает
+CSS-селектор. Без селектора выбирается первый `main`, затем `article`, затем
+`body`; скрипты и стили исключаются. Это простая эвристика, а не универсальный
+алгоритм определения статьи. JavaScript не исполняется.
+
+Ссылки уникальны, сохраняют порядок, query и фрагменты. Допускаются HTTP/HTTPS
+с непустым хостом и корректным портом, без пробелов и встроенных логина/пароля;
+`mailto`, `javascript`, `data` пропускаются. Это проверка формы URL, не доступности.
+`HTMLParser(internal_only=True)` оставляет ссылки с тем же hostname (поддомены
+считаются внешними). Для клиента: `crawler.parser = HTMLParser(internal_only=True)`.
+
+Изображения — записи `src` (абсолютный HTTP/HTTPS URL) и `alt` (пустой при отсутствии).
+Изображения без корректного `src`, включая data URI и lazy-loading только в data-src,
+пропускаются. Заголовки — записи `level` и `text`. Таблицы — списки строк ячеек
+в порядке документа; rowspan/colspan не разворачиваются. Каждый ul/ol — запись
+`type` и `items`; вложенные списки выдаются отдельно.
+
+BeautifulSoup/lxml восстанавливает многие ошибки разметки автоматически, поэтому
+не каждый незакрытый тег вызывает предупреждение. Пустой ввод, отсутствие title,
+сбой разбора или извлекателя логируются и попадают в `warnings`. При сбое lxml
+пробуем встроенный html.parser; при сбое отдельного извлекателя сохраняем остальные
+поля. Синхронный разбор запускается через `asyncio.to_thread`.
+
+Демонстрация печатает статистику и первые пять ссылок/заголовков; `--output`
+сохраняет все данные в JSON через aiofiles. Локальный режим показывает корректную
+страницу, повреждённый HTML и HTTP 404. Тесты не требуют Интернета.
+
+Документация: [Beautiful Soup](https://www.crummy.com/software/BeautifulSoup/bs4/doc/),
+[urllib.parse](https://docs.python.org/3/library/urllib.parse.html).
+
 ## День 1 — Асинхронный HTTP-клиент
 
 Python 3.10+. Все команды выполняются из этой папки в PowerShell.
