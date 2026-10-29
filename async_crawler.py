@@ -2,9 +2,14 @@
 
 import asyncio
 import logging
+import re
+from time import perf_counter
+from urllib.parse import urlsplit
 
 import aiohttp
 from html_parser import HTMLParser
+from crawler_queue import CrawlerQueue
+from semaphore_manager import SemaphoreManager
 
 logger = logging.getLogger(__name__)
 
@@ -19,12 +24,20 @@ class AsyncCrawler:
         connect_timeout: float = 5,
         read_timeout: float = 10,
         total_timeout: float = 30,
+        max_depth: int | None = None,
+        per_domain_limit: int = 2,
     ):
         if isinstance(max_concurrent, bool) or not isinstance(max_concurrent, int) or max_concurrent < 1:
             raise ValueError("max_concurrent должен быть положительным целым числом")
         if min(connect_timeout, read_timeout, total_timeout) <= 0:
             raise ValueError("Таймауты должны быть положительными")
+        if max_depth is not None and (isinstance(max_depth, bool) or not isinstance(max_depth, int) or max_depth < 0):
+            raise ValueError("max_depth должен быть неотрицательным целым числом или None")
+        if isinstance(per_domain_limit, bool) or not isinstance(per_domain_limit, int) or per_domain_limit < 1:
+            raise ValueError("per_domain_limit должен быть положительным целым числом")
         self.max_concurrent = max_concurrent
+        self.max_depth = max_depth
+        self.per_domain_limit = per_domain_limit
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._timeout = aiohttp.ClientTimeout(
             total=total_timeout,
@@ -38,6 +51,13 @@ class AsyncCrawler:
         self.statuses: dict[str, int] = {}
         self.final_urls = {}
         self.parser = HTMLParser()
+        self.visited_urls = set()
+        self.failed_urls = {}
+        self.processed_urls = {}
+        self.queue = None
+        self.url_depths = {}
+        self.semaphore_manager = None
+        self.crawl_stats = {}
 
     def _get_session(self):
         if self._closed:
@@ -95,6 +115,110 @@ class AsyncCrawler:
         result = await self.parser.parse_html(html, self.final_urls.get(url, url))
         result["url"] = url
         return result
+
+    async def crawl(self, start_urls: list[str], max_pages: int = 100,
+                    same_domain_only=False, exclude_patterns=None,
+                    include_patterns=None, progress_callback=None):
+        """Обойти страницы совместно; max_pages считает попытки, включая ошибки."""
+        if isinstance(max_pages, bool) or not isinstance(max_pages, int) or max_pages < 1:
+            raise ValueError("max_pages должен быть положительным целым числом")
+        if self._closed:
+            raise RuntimeError("AsyncCrawler уже закрыт")
+        if not isinstance(start_urls, list):
+            raise ValueError("start_urls должен быть списком URL")
+        excluded = [re.compile(pattern) for pattern in (exclude_patterns or [])]
+        included = [re.compile(pattern) for pattern in (include_patterns or [])]
+        roots = set()
+        for url in start_urls:
+            if self.parser._absolute_url(url, url) != url:
+                raise ValueError(f"Некорректный стартовый URL: {url}")
+            roots.add(urlsplit(url).hostname)
+
+        def allowed(url):
+            if self.parser._absolute_url(url, url) != url:
+                return False
+            if same_domain_only and urlsplit(url).hostname not in roots:
+                return False
+            if any(pattern.search(url) for pattern in excluded):
+                return False
+            if included and not any(pattern.search(url) for pattern in included):
+                return False
+            return True
+
+        self.queue = CrawlerQueue()
+        self.visited_urls = set()
+        self.failed_urls = {}
+        self.processed_urls = {}
+        self.url_depths = {}
+        self.semaphore_manager = SemaphoreManager(self.max_concurrent, self.per_domain_limit)
+        started = perf_counter()
+
+        def report():
+            done = len(self.processed_urls) + len(self.failed_urls)
+            stats = self.queue.get_stats()
+            elapsed = max(perf_counter() - started, 1e-9)
+            self.crawl_stats = {
+                "processed": len(self.processed_urls), "queued": stats["pending"],
+                "failed": len(self.failed_urls), "active": stats["active"],
+                "pages_per_second": done / elapsed,
+            }
+            logger.info("Обход: обработано=%s в очереди=%s ошибок=%s скорость=%.2f стр/с",
+                        self.crawl_stats["processed"], self.crawl_stats["queued"],
+                        self.crawl_stats["failed"], self.crawl_stats["pages_per_second"])
+            if progress_callback is not None:
+                progress_callback(self.crawl_stats.copy())
+
+        for url in start_urls:
+            if allowed(url) and self.queue.add_url(url):
+                self.url_depths[url.strip()] = 0
+        report()
+
+        async def process(url):
+            try:
+                async with self.semaphore_manager.limit(urlsplit(url).hostname):
+                    page = await self.fetch_and_parse(url)
+            except Exception as exc:
+                error = f"{type(exc).__name__}: {exc}"
+                self.failed_urls[url] = error
+                self.queue.mark_failed(url, error)
+                logger.warning("Обход %s: %s", url, error)
+                report()
+                return
+            if "error" in page:
+                self.failed_urls[url] = page["error"]
+                self.queue.mark_failed(url, page["error"])
+                report()
+                return
+            self.processed_urls[url] = page
+            self.queue.mark_processed(url)
+            next_depth = self.url_depths[url] + 1
+            if self.max_depth is None or next_depth <= self.max_depth:
+                for link in page["links"]:
+                    if allowed(link) and self.queue.add_url(link, priority=next_depth):
+                        self.url_depths[link] = next_depth
+            report()
+
+        running = set()
+        try:
+            while True:
+                while len(running) < self.max_concurrent and len(self.visited_urls) < max_pages:
+                    url = await self.queue.get_next()
+                    if url is None:
+                        break
+                    self.visited_urls.add(url)
+                    running.add(asyncio.create_task(process(url)))
+                if not running:
+                    break
+                completed, running = await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+                for task in completed:
+                    task.result()
+        finally:
+            if running:
+                for task in running:
+                    task.cancel()
+                await asyncio.gather(*running, return_exceptions=True)
+
+        return self.processed_urls.copy()
 
     async def close(self):
         """Закрыть сессию и пул; повторный вызов безопасен. Дождитесь запросов перед close."""

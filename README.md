@@ -1,6 +1,44 @@
 # ITGrind2
 week 2
 
+## День 3 — обход сайта
+
+`await crawler.crawl(start_urls, max_pages=100)` берёт URL из
+`CrawlerQueue`, загружает и разбирает страницу, сохраняет результат и добавляет
+найденные ссылки. `max_pages` считает все попытки, включая HTTP-ошибки. Повторные
+адреса не добавляются. Каждый вызов `crawl` начинает обход заново; состояние
+доступно в `visited_urls`, `processed_urls`, `failed_urls` и `queue.get_stats()`.
+
+```python
+async with AsyncCrawler() as crawler:
+    pages = await crawler.crawl(["https://example.com"], max_pages=5)
+    print(crawler.queue.get_stats())
+```
+
+`max_depth` задаётся при создании клиента: стартовые URL имеют глубину 0,
+их ссылки — 1 и так далее. При `max_depth=0` обрабатываются только стартовые URL.
+`None` по умолчанию означает отсутствие ограничения; глубины добавленных URL
+доступны в `crawler.url_depths`. `max_concurrent` ограничивает все одновременные
+загрузки, `per_domain_limit` (по умолчанию 2) — загрузки одного hostname.
+`SemaphoreManager` предоставляет статистику активных задач через
+`crawler.semaphore_manager.stats()`.
+
+`same_domain_only=True` разрешает ссылки только на hostname стартовых URL.
+`include_patterns` и `exclude_patterns` — списки регулярных выражений для
+полного URL; приоритет у исключения. Стартовые URL проходят те же фильтры.
+`max_pages` считает начатые попытки, включая ошибки. `progress_callback`
+вызывается при старте и после каждой страницы и получает `processed`, `queued`,
+`failed`, `active`, `pages_per_second`; снимок также есть в `crawl_stats`.
+Для внешних сайтов выбирайте небольшой `max_pages`.
+
+```powershell
+.\.venv\Scripts\python.exe demo_day3.py --local
+.\.venv\Scripts\python.exe demo_day3.py https://example.com --depth 1 --max-pages 5
+```
+
+Демо выводит прогресс в реальном времени и сохраняет полные данные в
+`results_day3.json`. Локальный режим работает без Интернета.
+
 ## День 2 — Парсинг HTML
 
 Реализация продолжает проект первого дня в той же папке.

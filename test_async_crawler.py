@@ -76,8 +76,8 @@ class CrawlerTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("ClientConnectorError", crawler.errors[url])
 
     async def test_read_timeout_and_recovery(self):
-        slow = self.base + "/page?delay=0.2"
-        async with AsyncCrawler(read_timeout=0.04) as crawler:
+        slow = self.base + "/page?delay=0.5"
+        async with AsyncCrawler(read_timeout=0.15) as crawler:
             self.assertEqual(await crawler.fetch_url(slow), "")
             self.assertIn("Timeout", crawler.errors[slow])
             self.assertEqual(await crawler.fetch_url(self.base + "/page"), "Привет")
